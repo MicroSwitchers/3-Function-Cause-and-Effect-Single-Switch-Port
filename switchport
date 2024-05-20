@@ -1,0 +1,240 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <BleCombo.h>
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET    -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+const int modeButtonPin = 5; // Onboard button = 0
+const int actionButtonPin = 4; // External switch
+
+String modes[] = {"Standard\nClick", "Quick\nClick", "Media\nTimed", "Media\nDirect"};
+unsigned long mediaDurations[] = {5000, 10000, 20000, 45000, 60000}; // 5s, 10s, 20s, 45s, 60s
+int currentModeIndex = 0, currentDurationIndex = 0;
+unsigned long lastActionButtonPress = 0, lastModeButtonPress = 0;
+const unsigned long doubleClickGuardDuration = 700; // Duration to prevent double click
+bool isButtonPressed = false, isTimerActive = false, modeButtonLongPressed = false;
+unsigned long timerEndTime = 0;
+int animationStep = 0;
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("Starting BLE work!");
+
+  pinMode(modeButtonPin, INPUT_PULLUP);
+  pinMode(actionButtonPin, INPUT_PULLUP);
+
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  display.clearDisplay();
+
+  Keyboard.begin();
+  Mouse.begin();
+
+  updateDisplay();
+}
+
+void loop() {
+  handleModeButton();
+  handleActionButton();
+  checkTimer();
+
+  if (isTimerActive) {
+    displayProgressBar();
+    delay(100); // Small delay for smoother progress bar update
+  }
+}
+
+void handleModeButton() {
+  bool currentPress = digitalRead(modeButtonPin) == LOW;
+  unsigned long currentMillis = millis();
+
+  if (currentPress && !lastModeButtonPress && (currentMillis - lastModeButtonPress > doubleClickGuardDuration)) {
+    lastModeButtonPress = currentMillis;
+    cycleModes();
+    updateDisplay();
+    delay(150); // Short delay to prevent rapid mode cycling
+  } else if (!currentPress && lastModeButtonPress) {
+    lastModeButtonPress = 0;
+  }
+}
+
+void handleActionButton() {
+  bool currentPress = digitalRead(actionButtonPin) == LOW;
+  unsigned long currentMillis = millis();
+
+  switch (currentModeIndex) {
+    case 0: // Standard Click
+    case 1: // Quick Click
+      standardQuickClickHandler(currentPress);
+      break;
+    case 2: // Media Click
+      mediaClickHandler(currentPress);
+      break;
+    case 3: // Media Direct
+      mediaDirectHandler(currentPress, currentMillis);
+      break;
+  }
+}
+
+void standardQuickClickHandler(bool currentPress) {
+  if (!isTimerActive && currentPress && !isButtonPressed) {
+    isButtonPressed = true;
+    performAction();
+    lastActionButtonPress = millis();
+    displayAnimation(true);
+  } else if (!currentPress && isButtonPressed) {
+    isButtonPressed = false;
+    releaseAction();
+    displayAnimation(false);
+    updateDisplay();
+  }
+
+  if (isButtonPressed) {
+    if (millis() - lastActionButtonPress > 200) {
+      lastActionButtonPress = millis();
+      displayAnimation(true);
+    }
+  }
+}
+
+void mediaClickHandler(bool currentPress) {
+  if (!isTimerActive && currentPress && !isButtonPressed) {
+    isButtonPressed = true;
+    performAction();
+    lastActionButtonPress = millis();
+    displayAnimation(true);
+  } else if (!currentPress && isButtonPressed) {
+    isButtonPressed = false;
+    releaseAction();
+    displayAnimation(false);
+    updateDisplay();
+  }
+}
+
+void mediaDirectHandler(bool currentPress, unsigned long currentMillis) {
+  if (currentPress && !isButtonPressed && (currentMillis - lastActionButtonPress > doubleClickGuardDuration)) {
+    isButtonPressed = true;
+    lastActionButtonPress = currentMillis;
+    Mouse.click(MOUSE_LEFT);
+    delay(50); // Reduced delay
+  } else if (!currentPress && isButtonPressed && (currentMillis - lastActionButtonPress > doubleClickGuardDuration)) {
+    isButtonPressed = false;
+    lastActionButtonPress = currentMillis;
+    Mouse.click(MOUSE_LEFT);
+    delay(50); // Reduced delay
+  }
+}
+
+void checkTimer() {
+  if (isTimerActive && millis() >= timerEndTime) {
+    isTimerActive = false;
+    if (currentModeIndex == 2) { 
+      Mouse.click(MOUSE_LEFT); // Perform the final click action
+    }
+    updateDisplay();
+  }
+}
+
+void cycleModes() {
+  currentModeIndex = (currentModeIndex + 1) % (sizeof(modes) / sizeof(String));
+}
+
+void cycleDuration() {
+  currentDurationIndex = (currentDurationIndex + 1) % (sizeof(mediaDurations) / sizeof(unsigned long));
+}
+
+void updateDisplay() {
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println(modes[currentModeIndex]);
+
+  if (currentModeIndex == 2 && !isTimerActive) {
+    display.setCursor(0, 50);
+    display.print("Timer: ");
+    display.print(mediaDurations[currentDurationIndex] / 1000);
+    display.println("s");
+  }
+  display.display();
+}
+
+void displayProgressBar() {
+  unsigned long remainingTime = timerEndTime - millis();
+  float progress = (float)remainingTime / (float)mediaDurations[currentDurationIndex];
+  progress = constrain(progress, 0, 1);
+
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println(modes[currentModeIndex]);
+
+  int progressBarHeight = 6;
+  int progressBarY = 50;
+  int progressBarWidth = (int)(128 * progress);
+
+  display.fillRect(0, progressBarY, progressBarWidth, progressBarHeight, SSD1306_WHITE);
+  display.display();
+}
+
+void performAction() {
+  if (Keyboard.isConnected()) {
+    switch (currentModeIndex) {
+      case 0: // Standard Click
+        Mouse.press(MOUSE_LEFT);
+        break;
+      case 1: // Quick Click
+        Mouse.click(MOUSE_LEFT);
+        break;
+      case 2: // Media Click
+        Mouse.click(MOUSE_LEFT);
+        timerEndTime = millis() + mediaDurations[currentDurationIndex];
+        isTimerActive = true;
+        break;
+      case 3: // Media Direct
+        // Media Direct actions are handled in mediaDirectHandler()
+        break;
+    }
+  }
+}
+
+void releaseAction() {
+  if (currentModeIndex == 0) {
+    Mouse.release(MOUSE_LEFT);
+  }
+}
+
+void displayAnimation(bool isPressed) {
+  int animationYPos = 30;
+  if (isPressed) {
+    animationStep = (animationStep + 1) % 4;
+    display.clearDisplay();
+    display.setTextSize(2);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.println(modes[currentModeIndex]);
+    if (currentModeIndex != 2 || !isTimerActive) {
+      display.setCursor(0, 50);
+      display.print("Timer: ");
+      display.print(mediaDurations[currentDurationIndex] / 1000);
+      display.println("s");
+    }
+
+    for (int i = 0; i < 3; i++) {
+      display.setCursor(20 + i * 30, animationYPos);
+      if (i == animationStep) {
+        display.print("*");
+      } else {
+        display.print(".");
+      }
+    }
+    display.display();
+  } else {
+    animationStep = 0;
+    updateDisplay();
+  }
+}
