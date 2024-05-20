@@ -5,20 +5,44 @@
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
-#define OLED_RESET    -1
+#define OLED_RESET -1
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 const int modeButtonPin = 5; // Onboard button = 0
 const int actionButtonPin = 4; // External switch
 
-String modes[] = {"Standard\nClick", "Quick\nClick", "Media\nTimed", "Media\nDirect"};
+String modes[] = {"Regular\nClick", "Quick\nClick", "Timed\nClick", "Regular\nSpace", "Quick\nSpace", "Timed\nSpace"};
 unsigned long mediaDurations[] = {5000, 10000, 20000, 45000, 60000}; // 5s, 10s, 20s, 45s, 60s
 int currentModeIndex = 0, currentDurationIndex = 0;
-unsigned long lastActionButtonPress = 0, lastModeButtonPress = 0;
-const unsigned long doubleClickGuardDuration = 700; // Duration to prevent double click
+unsigned long lastActionButtonPress = 0, lastModeButtonPress = 0, lastIncrementTime = 0;
+const unsigned long debounceDelay = 50; // Debounce delay in milliseconds
+const unsigned long longPressInterval = 1100; // Long press interval for Timed Click/Space modes
+const unsigned long repeatInterval = 600; // Repeat interval for continuous increment
+const unsigned long doubleClickGuardDuration = 1100; // Duration to prevent double click
 bool isButtonPressed = false, isTimerActive = false, modeButtonLongPressed = false;
 unsigned long timerEndTime = 0;
-int animationStep = 0;
+
+// Variables for debounce algorithm
+unsigned long lastDebounceTimeAction = 0;
+bool lastButtonStateAction = HIGH;
+bool buttonStateAction = HIGH;
+
+// Function to handle debouncing
+bool debouncedButtonState(int buttonPin) {
+  bool reading = digitalRead(buttonPin);
+  if (reading != lastButtonStateAction) {
+    lastDebounceTimeAction = millis();
+  }
+
+  if ((millis() - lastDebounceTimeAction) > debounceDelay) {
+    if (reading != buttonStateAction) {
+      buttonStateAction = reading;
+    }
+  }
+
+  lastButtonStateAction = reading;
+  return buttonStateAction;
+}
 
 void setup() {
   Serial.begin(115200);
@@ -50,32 +74,61 @@ void loop() {
 void handleModeButton() {
   bool currentPress = digitalRead(modeButtonPin) == LOW;
   unsigned long currentMillis = millis();
+  static unsigned long buttonPressStartTime = 0;
 
-  if (currentPress && !lastModeButtonPress && (currentMillis - lastModeButtonPress > doubleClickGuardDuration)) {
-    lastModeButtonPress = currentMillis;
-    cycleModes();
-    updateDisplay();
-    delay(150); // Short delay to prevent rapid mode cycling
-  } else if (!currentPress && lastModeButtonPress) {
-    lastModeButtonPress = 0;
+  if (currentPress) {
+    if (!lastModeButtonPress) {
+      lastModeButtonPress = currentMillis;
+      buttonPressStartTime = currentMillis;
+      modeButtonLongPressed = false;
+      if (isTimerActive) {
+        // Cancel the timer if it is active
+        isTimerActive = false;
+        if (currentModeIndex < 3) {
+          Mouse.click(MOUSE_LEFT); // Click to stop the media for Click modes
+        } else {
+          Keyboard.write(' '); // Space to stop the media for Space modes
+        }
+        updateDisplay();
+        return;
+      }
+    } else if ((currentModeIndex == 2 || currentModeIndex == 5) && (currentMillis - buttonPressStartTime >= longPressInterval)) {
+      if (currentMillis - lastModeButtonPress >= repeatInterval) {
+        cycleDuration();
+        updateDisplay();
+        lastModeButtonPress = currentMillis; // Update time for repeat action
+        modeButtonLongPressed = true; // Mark as long pressed
+      }
+    }
+  } else if (lastModeButtonPress) {
+    if (!modeButtonLongPressed && (currentMillis - lastModeButtonPress >= debounceDelay) && (currentMillis - buttonPressStartTime < longPressInterval)) {
+      // Short press - cycle modes
+      cycleModes();
+      updateDisplay();
+    }
+    lastModeButtonPress = 0; // Reset the button press flag
   }
 }
 
 void handleActionButton() {
-  bool currentPress = digitalRead(actionButtonPin) == LOW;
+  if (isTimerActive) {
+    return; // Ignore button presses if the timer is active
+  }
+
+  bool currentPress = !debouncedButtonState(actionButtonPin);
   unsigned long currentMillis = millis();
 
-  switch (currentModeIndex) {
-    case 0: // Standard Click
-    case 1: // Quick Click
-      standardQuickClickHandler(currentPress);
-      break;
-    case 2: // Media Click
-      mediaClickHandler(currentPress);
-      break;
-    case 3: // Media Direct
-      mediaDirectHandler(currentPress, currentMillis);
-      break;
+  if (currentPress && (currentMillis - lastActionButtonPress > debounceDelay)) {
+    if (!isButtonPressed) {
+      isButtonPressed = true;
+      performAction();
+      lastActionButtonPress = currentMillis;
+    }
+  } else if (!currentPress && isButtonPressed) {
+    isButtonPressed = false;
+    lastActionButtonPress = currentMillis;
+    releaseAction();
+    updateDisplay();
   }
 }
 
@@ -84,55 +137,32 @@ void standardQuickClickHandler(bool currentPress) {
     isButtonPressed = true;
     performAction();
     lastActionButtonPress = millis();
-    displayAnimation(true);
   } else if (!currentPress && isButtonPressed) {
     isButtonPressed = false;
     releaseAction();
-    displayAnimation(false);
     updateDisplay();
-  }
-
-  if (isButtonPressed) {
-    if (millis() - lastActionButtonPress > 200) {
-      lastActionButtonPress = millis();
-      displayAnimation(true);
-    }
   }
 }
 
-void mediaClickHandler(bool currentPress) {
+void timedClickHandler(bool currentPress) {
   if (!isTimerActive && currentPress && !isButtonPressed) {
     isButtonPressed = true;
     performAction();
     lastActionButtonPress = millis();
-    displayAnimation(true);
   } else if (!currentPress && isButtonPressed) {
     isButtonPressed = false;
     releaseAction();
-    displayAnimation(false);
     updateDisplay();
-  }
-}
-
-void mediaDirectHandler(bool currentPress, unsigned long currentMillis) {
-  if (currentPress && !isButtonPressed && (currentMillis - lastActionButtonPress > doubleClickGuardDuration)) {
-    isButtonPressed = true;
-    lastActionButtonPress = currentMillis;
-    Mouse.click(MOUSE_LEFT);
-    delay(50); // Reduced delay
-  } else if (!currentPress && isButtonPressed && (currentMillis - lastActionButtonPress > doubleClickGuardDuration)) {
-    isButtonPressed = false;
-    lastActionButtonPress = currentMillis;
-    Mouse.click(MOUSE_LEFT);
-    delay(50); // Reduced delay
   }
 }
 
 void checkTimer() {
   if (isTimerActive && millis() >= timerEndTime) {
     isTimerActive = false;
-    if (currentModeIndex == 2) { 
-      Mouse.click(MOUSE_LEFT); // Perform the final click action
+    if (currentModeIndex == 2) {
+      Mouse.click(MOUSE_LEFT); // Perform the final click action for Click modes
+    } else if (currentModeIndex == 5) {
+      Keyboard.write(' '); // Perform the final space action for Space modes
     }
     updateDisplay();
   }
@@ -153,7 +183,7 @@ void updateDisplay() {
   display.setCursor(0, 0);
   display.println(modes[currentModeIndex]);
 
-  if (currentModeIndex == 2 && !isTimerActive) {
+  if ((currentModeIndex == 2 || currentModeIndex == 5) && !isTimerActive) {
     display.setCursor(0, 50);
     display.print("Timer: ");
     display.print(mediaDurations[currentDurationIndex] / 1000);
@@ -190,13 +220,21 @@ void performAction() {
       case 1: // Quick Click
         Mouse.click(MOUSE_LEFT);
         break;
-      case 2: // Media Click
+      case 2: // Timed Click
         Mouse.click(MOUSE_LEFT);
         timerEndTime = millis() + mediaDurations[currentDurationIndex];
         isTimerActive = true;
         break;
-      case 3: // Media Direct
-        // Media Direct actions are handled in mediaDirectHandler()
+      case 3: // Regular Space
+        Keyboard.press(' ');
+        break;
+      case 4: // Quick Space
+        Keyboard.write(' ');
+        break;
+      case 5: // Timed Space
+        Keyboard.write(' ');
+        timerEndTime = millis() + mediaDurations[currentDurationIndex];
+        isTimerActive = true;
         break;
     }
   }
@@ -205,36 +243,7 @@ void performAction() {
 void releaseAction() {
   if (currentModeIndex == 0) {
     Mouse.release(MOUSE_LEFT);
-  }
-}
-
-void displayAnimation(bool isPressed) {
-  int animationYPos = 30;
-  if (isPressed) {
-    animationStep = (animationStep + 1) % 4;
-    display.clearDisplay();
-    display.setTextSize(2);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(0, 0);
-    display.println(modes[currentModeIndex]);
-    if (currentModeIndex != 2 || !isTimerActive) {
-      display.setCursor(0, 50);
-      display.print("Timer: ");
-      display.print(mediaDurations[currentDurationIndex] / 1000);
-      display.println("s");
-    }
-
-    for (int i = 0; i < 3; i++) {
-      display.setCursor(20 + i * 30, animationYPos);
-      if (i == animationStep) {
-        display.print("*");
-      } else {
-        display.print(".");
-      }
-    }
-    display.display();
-  } else {
-    animationStep = 0;
-    updateDisplay();
+  } else if (currentModeIndex == 3) {
+    Keyboard.release(' ');
   }
 }
